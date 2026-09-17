@@ -69,6 +69,9 @@ func (s *server) pedidos(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil { writeError(w, 400, err); return }
 		item, err := s.insert(r.Context(), "pedidos", payload)
 		if err != nil { writeError(w, 500, err); return }
+		if flowers, ok := payload["itemsFlores"].([]any); ok {
+			if err := s.persistFlowerItems(r.Context(), item, flowers); err != nil { log.Printf("no se pudieron guardar items_flores: %v", err) }
+		}
 		writeJSON(w, http.StatusCreated, item)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -139,6 +142,18 @@ func (s *server) attachFlowerItems(ctx context.Context, orders []map[string]any)
 func firstValue(values map[string]any, keys ...string) string {
 	for _, key := range keys { if value, ok := values[key]; ok && value != nil && fmt.Sprint(value) != "" { return fmt.Sprint(value) } }
 	return ""
+}
+
+func (s *server) persistFlowerItems(ctx context.Context, order map[string]any, flowers []any) error {
+	cols, err := s.columns(ctx, "items_flores"); if err != nil || len(cols) == 0 { return err }
+	orderID := firstValue(order, "id", "pedido_id"); if orderID == "" { return nil }
+	foreignKey := resolveColumn(cols, "pedido_id"); if foreignKey == "" { foreignKey = resolveColumn(cols, "pedidoId") }; if foreignKey == "" { foreignKey = resolveColumn(cols, "id_pedido") }; if foreignKey == "" { return nil }
+	for _, raw := range flowers {
+		flower, ok := raw.(map[string]any); if !ok { continue }
+		payload := map[string]any{foreignKey: orderID}; for key, value := range flower { payload[key] = value }
+		if _, err := s.insert(ctx, "items_flores", payload); err != nil { return err }
+	}
+	return nil
 }
 
 func (s *server) columns(ctx context.Context, table string) (map[string]string, error) {
