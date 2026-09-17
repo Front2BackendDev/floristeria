@@ -1,4 +1,4 @@
-import { db, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, query, orderBy } from './firebase-config.js';
+import { obtenerPedidos, crearPedido, actualizarEstadoPedido, eliminarPedido as apiEliminarPedido } from './api.js';
 
 const CONFIG = {
     PASSWORD_ADMIN: '2002',
@@ -91,10 +91,8 @@ function inicializar() {
     }
 }
 
-// Antes esto consultaba Firestore cada 5 min SIN IMPORTAR si la pestaña estaba visible,
-// y cada pestaña/ventana abierta sumaba su propio conteo — eso fue lo que agotó la cuota
-// gratuita de lecturas. Ahora solo consulta mientras la pestaña está activa, y se pausa
-// apenas se minimiza o se cambia a otra pestaña.
+// Consulta periódica de pedidos cuando la pestaña está visible
+// (evita llamadas innecesarias cuando la pestaña está en segundo plano).
 let intervaloPollingId = null;
 
 function iniciarPollingInteligente() {
@@ -315,9 +313,7 @@ if (document.readyState === 'loading') {
 // --- FUNCIONES PRINCIPALES ---
 async function cargarPedidos() {
     try {
-        const q = query(collection(db, 'pedidos'), orderBy('fechaCreacion', 'desc'));
-        const snap = await getDocs(q);
-        state.pedidos = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        state.pedidos = await obtenerPedidos();
         state.pedidos.sort((a, b) => new Date(a.fechaEntrega) - new Date(b.fechaEntrega));
         aplicarFiltros();
         mostrarPanelNotificaciones();
@@ -327,23 +323,15 @@ async function cargarPedidos() {
     }
 }
 
-// Antes este error solo quedaba en la consola del navegador (invisible para el admin).
-// Ahora se muestra directamente en el panel, con una pista si parece un problema de permisos de Firestore.
 function mostrarErrorCarga(e) {
     const lista = document.getElementById('lista-pedidos');
     if (!lista) return;
     const msg = (e && e.message) ? e.message : String(e);
-    let pista = '';
-    if (/quota|resource-exhausted|429/i.test(msg)) {
-        pista = '<p class="text-xs text-red-500 mt-2">Se agotó la cuota gratuita diaria de lecturas de Firestore. Se restablece sola (normalmente de madrugada) — revisá "Uso" en la consola de Firebase para ver el conteo exacto y cuándo resetea.</p>';
-    } else if (/permission|insufficient|denied/i.test(msg)) {
-        pista = '<p class="text-xs text-red-500 mt-2">Esto suena a un problema de permisos en Firestore — revisá las reglas de seguridad en la consola de Firebase (es común que el modo de prueba haya vencido y ahora bloquee todo por defecto).</p>';
-    }
     lista.innerHTML = `
         <div class="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm">
             <p class="font-bold mb-1"><i class="fas fa-exclamation-triangle mr-1"></i> No se pudieron cargar los pedidos</p>
             <p class="text-xs text-red-600 font-mono break-all">${msg}</p>
-            ${pista}
+            <p class="text-xs text-slate-500 mt-2">Verifica la conexión con el backend en Railway y la base de datos PostgreSQL.</p>
         </div>`;
 }
 
@@ -407,7 +395,7 @@ async function enviarPedido() {
     };
 
     try {
-        await addDoc(collection(db, 'pedidos'), data);
+        await crearPedido(data);
         const fmtMoneda = (n) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', minimumFractionDigits: 0 }).format(n || 0);
         const monto = fmtMoneda(data.montoAnticipo);
         const total = fmtMoneda(data.montoTotal);
@@ -641,7 +629,7 @@ function mostrarPanelNotificaciones() {
 }
 
 async function cambiarEstado(id, nuevoEstado) {
-    await updateDoc(doc(db, 'pedidos', id), { estado: nuevoEstado });
+    await actualizarEstadoPedido(id, nuevoEstado);
     cargarPedidos();
 }
 
@@ -652,7 +640,7 @@ function eliminarPedido(id) {
 
 async function confirmarEliminacion() {
     if(state.pedidoAEliminar) {
-        await deleteDoc(doc(db, 'pedidos', state.pedidoAEliminar));
+        await apiEliminarPedido(state.pedidoAEliminar);
         document.getElementById('modal-eliminar').classList.add('hidden');
         cargarPedidos();
     }

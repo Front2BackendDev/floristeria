@@ -1,5 +1,6 @@
 [build]
 builder = "NIXPACKS"
+buildCommand = "go build -o floristeria ."
 
 [deploy]
 startCommand = "./floristeria"

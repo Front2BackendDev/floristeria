@@ -1,6 +1,0 @@
-# Este sitio es una sola página (index.html) sin rutas internas,
-# así que no necesita reglas de redirect tipo SPA-fallback.
-# (Se quitaron a propósito: un catch-all "/* -> /index.html" puede
-# terminar sirviendo el HTML en vez del archivo real si Netlify no
-# encuentra el asset exacto, que es justo el síntoma que se vio:
-# tailwind.css, app.js y logo.jpeg sin cargar mientras el HTML sí.)
