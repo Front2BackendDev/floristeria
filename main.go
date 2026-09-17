@@ -62,6 +62,7 @@ func (s *server) pedidos(w http.ResponseWriter, r *http.Request) {
 			out = append(out, item)
 		}
 		if err := rows.Err(); err != nil { writeError(w, 500, err); return }
+		if err := s.attachFlowerItems(r.Context(), out); err != nil { log.Printf("no se pudieron asociar items_flores: %v", err) }
 		writeJSON(w, http.StatusOK, out)
 	case http.MethodPost:
 		var payload map[string]any
@@ -116,6 +117,28 @@ func (s *server) insert(ctx context.Context, table string, payload map[string]an
 	var raw []byte
 	if err := s.db.QueryRow(ctx, q, args...).Scan(&raw); err != nil { return nil, err }
 	var out map[string]any; return out, json.Unmarshal(raw, &out)
+}
+
+// Conserva la forma itemsFlores que esperaba el frontend cuando la migración
+// mantiene esos registros en una tabla relacional separada.
+func (s *server) attachFlowerItems(ctx context.Context, orders []map[string]any) error {
+	var exists bool
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='items_flores')`).Scan(&exists); err != nil || !exists { return nil }
+	rows, err := s.db.Query(ctx, `SELECT row_to_json(f) FROM items_flores f`); if err != nil { return err }; defer rows.Close()
+	byOrder := map[string][]map[string]any{}
+	for rows.Next() {
+		var raw []byte; if err := rows.Scan(&raw); err != nil { return err }
+		var item map[string]any; if err := json.Unmarshal(raw, &item); err != nil { return err }
+		fk := firstValue(item, "pedido_id", "pedidoId", "id_pedido", "pedido")
+		if fk != "" { byOrder[fk] = append(byOrder[fk], item) }
+	}
+	for _, order := range orders { id := firstValue(order, "id", "pedido_id"); if items := byOrder[id]; id != "" && len(items) > 0 { order["itemsFlores"] = items } }
+	return rows.Err()
+}
+
+func firstValue(values map[string]any, keys ...string) string {
+	for _, key := range keys { if value, ok := values[key]; ok && value != nil && fmt.Sprint(value) != "" { return fmt.Sprint(value) } }
+	return ""
 }
 
 func (s *server) columns(ctx context.Context, table string) (map[string]string, error) {
