@@ -1,0 +1,21 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Inter:wght@300;400;500;600&display=swap');
+
+body {
+    font-family: 'Inter', sans-serif;
+}
+
+h1, h2, h3, .font-serif {
+    font-family: 'Playfair Display', serif;
+}
+
+/* Animaciones */
+.fade-in { animation: fadeIn 0.5s ease-out forwards; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Forzar color de texto en inputs para evitar texto invisible */
+input, textarea, select {
+    color: #1e293b !important; /* Slate-800 */
+}
+input::placeholder, textarea::placeholder {
+    color: #94a3b8 !important; /* Slate-400 */
+}

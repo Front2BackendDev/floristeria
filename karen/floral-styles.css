@@ -1,0 +1,33 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Inter:wght@300;400;600&display=swap');
+
+/* Animación de entrada suave */
+.fade-in {
+    animation: fadeIn 0.5s ease-out forwards;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* Logo: flotación suave + sombra difusa en vez de un recuadro duro */
+.logo-flotante {
+    animation: logoFloat 6s ease-in-out infinite, logoEntrada 0.9s ease-out;
+    filter: drop-shadow(0 12px 18px rgba(190, 24, 93, 0.18));
+}
+
+@keyframes logoFloat {
+    0%, 100% { transform: translateY(0px) rotate(0deg); }
+    50% { transform: translateY(-10px) rotate(0.5deg); }
+}
+
+@keyframes logoEntrada {
+    from { opacity: 0; transform: translateY(-16px) scale(0.94); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Colores de selección */
+::selection {
+    background: #fecdd3; /* Rose-200 */
+    color: #881337; /* Rose-900 */
+}
