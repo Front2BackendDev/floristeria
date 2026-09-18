@@ -2,10 +2,13 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -34,10 +37,21 @@ func (r *postgresPedidoRepo) Ping(ctx context.Context) error {
 }
 
 func (r *postgresPedidoRepo) List(ctx context.Context) ([]map[string]any, error) {
-	rows, err := r.db.Query(ctx, `SELECT row_to_json(p) FROM pedidos p ORDER BY COALESCE(to_jsonb(p)->>'fechaCreacion', to_jsonb(p)->>'fecha_creacion') DESC NULLS LAST`)
-	if err != nil {
-		rows, err = r.db.Query(ctx, `SELECT row_to_json(p) FROM pedidos p`)
-	}
+	// Consulta combinada: recupera datos_originales y columnas actualizadas
+	q := `
+		SELECT 
+			firebase_id,
+			COALESCE(estado, datos_originales->>'estado', 'pendiente') AS estado,
+			COALESCE(fecha_entrega_texto, datos_originales->>'fechaEntrega', '') AS fecha_entrega_texto,
+			COALESCE(hora_entrega_texto, datos_originales->>'horaEntrega', '') AS hora_entrega_texto,
+			COALESCE(fecha_creacion_texto, datos_originales->>'fechaCreacion', '') AS fecha_creacion_texto,
+			COALESCE(monto_total_texto, datos_originales->>'montoTotal', '0') AS monto_total_texto,
+			COALESCE(monto_anticipo_texto, datos_originales->>'montoAnticipo', '0') AS monto_anticipo_texto,
+			datos_originales
+		FROM pedidos
+		ORDER BY COALESCE(fecha_creacion_texto, datos_originales->>'fechaCreacion') DESC NULLS LAST;
+	`
+	rows, err := r.db.Query(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("error listando pedidos: %w", err)
 	}
@@ -45,48 +59,114 @@ func (r *postgresPedidoRepo) List(ctx context.Context) ([]map[string]any, error)
 
 	out := make([]map[string]any, 0)
 	for rows.Next() {
-		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var firebaseID, estado, fechaEntrega, horaEntrega, fechaCreacion, montoTotal, montoAnticipo string
+		var datosOriginalesRaw []byte
+
+		if err := rows.Scan(
+			&firebaseID,
+			&estado,
+			&fechaEntrega,
+			&horaEntrega,
+			&fechaCreacion,
+			&montoTotal,
+			&montoAnticipo,
+			&datosOriginalesRaw,
+		); err != nil {
 			return nil, err
 		}
-		var item map[string]any
-		if err := json.Unmarshal(raw, &item); err != nil {
-			return nil, err
+
+		item := make(map[string]any)
+		if len(datosOriginalesRaw) > 0 {
+			_ = json.Unmarshal(datosOriginalesRaw, &item)
 		}
-		if item["id"] == nil {
-			item["id"] = FirstValue(item, "id", "pedido_id", "id_pedido")
+
+		// Asegurar sincronización de campos clave con la base de datos
+		item["id"] = firebaseID
+		item["firebase_id"] = firebaseID
+		item["estado"] = estado
+		if item["fechaEntrega"] == nil || item["fechaEntrega"] == "" {
+			item["fechaEntrega"] = fechaEntrega
 		}
+		if item["horaEntrega"] == nil || item["horaEntrega"] == "" {
+			item["horaEntrega"] = horaEntrega
+		}
+		if item["fechaCreacion"] == nil || item["fechaCreacion"] == "" {
+			item["fechaCreacion"] = fechaCreacion
+		}
+		if item["montoTotal"] == nil || item["montoTotal"] == "" {
+			item["montoTotal"] = montoTotal
+		}
+		if item["montoAnticipo"] == nil || item["montoAnticipo"] == "" {
+			item["montoAnticipo"] = montoAnticipo
+		}
+
 		out = append(out, item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
+	// Cargar y asociar flores de items_flores
 	if err := r.attachFlowerItems(ctx, out); err != nil {
-		log.Printf("repositorio: no se pudieron asociar items_flores: %v", err)
+		log.Printf("repositorio: advertencia asociando items_flores: %v", err)
 	}
+
 	return out, nil
 }
 
 func (r *postgresPedidoRepo) GetByID(ctx context.Context, id string) (map[string]any, error) {
-	cols, err := r.columns(ctx, "pedidos")
+	q := `
+		SELECT 
+			firebase_id,
+			COALESCE(estado, datos_originales->>'estado', 'pendiente') AS estado,
+			COALESCE(fecha_entrega_texto, datos_originales->>'fechaEntrega', '') AS fecha_entrega_texto,
+			COALESCE(hora_entrega_texto, datos_originales->>'horaEntrega', '') AS hora_entrega_texto,
+			COALESCE(fecha_creacion_texto, datos_originales->>'fechaCreacion', '') AS fecha_creacion_texto,
+			COALESCE(monto_total_texto, datos_originales->>'montoTotal', '0') AS monto_total_texto,
+			COALESCE(monto_anticipo_texto, datos_originales->>'montoAnticipo', '0') AS monto_anticipo_texto,
+			datos_originales
+		FROM pedidos
+		WHERE firebase_id = $1;
+	`
+	var firebaseID, estado, fechaEntrega, horaEntrega, fechaCreacion, montoTotal, montoAnticipo string
+	var datosOriginalesRaw []byte
+
+	err := r.db.QueryRow(ctx, q, id).Scan(
+		&firebaseID,
+		&estado,
+		&fechaEntrega,
+		&horaEntrega,
+		&fechaCreacion,
+		&montoTotal,
+		&montoAnticipo,
+		&datosOriginalesRaw,
+	)
 	if err != nil {
-		return nil, err
-	}
-	idCol := FindIDColumn(cols)
-
-	q := fmt.Sprintf(`SELECT row_to_json(p) FROM pedidos p WHERE "%s"::text = $1`, idCol)
-	var raw []byte
-	if err := r.db.QueryRow(ctx, q, id).Scan(&raw); err != nil {
-		return nil, fmt.Errorf("pedido con id %s no encontrado: %w", id, err)
+		return nil, fmt.Errorf("pedido %s no encontrado: %w", id, err)
 	}
 
-	var item map[string]any
-	if err := json.Unmarshal(raw, &item); err != nil {
-		return nil, err
+	item := make(map[string]any)
+	if len(datosOriginalesRaw) > 0 {
+		_ = json.Unmarshal(datosOriginalesRaw, &item)
 	}
-	if item["id"] == nil {
-		item["id"] = FirstValue(item, "id", "pedido_id", "id_pedido")
+
+	item["id"] = firebaseID
+	item["firebase_id"] = firebaseID
+	item["estado"] = estado
+	if item["fechaEntrega"] == nil || item["fechaEntrega"] == "" {
+		item["fechaEntrega"] = fechaEntrega
+	}
+	if item["horaEntrega"] == nil || item["horaEntrega"] == "" {
+		item["horaEntrega"] = horaEntrega
+	}
+	if item["fechaCreacion"] == nil || item["fechaCreacion"] == "" {
+		item["fechaCreacion"] = fechaCreacion
+	}
+	if item["montoTotal"] == nil || item["montoTotal"] == "" {
+		item["montoTotal"] = montoTotal
+	}
+	if item["montoAnticipo"] == nil || item["montoAnticipo"] == "" {
+		item["montoAnticipo"] = montoAnticipo
 	}
 
 	orders := []map[string]any{item}
@@ -95,275 +175,285 @@ func (r *postgresPedidoRepo) GetByID(ctx context.Context, id string) (map[string
 }
 
 func (r *postgresPedidoRepo) Create(ctx context.Context, payload map[string]any) (map[string]any, error) {
-	item, err := r.insert(ctx, "pedidos", payload)
+	// 1. Generar ID único para firebase_id
+	id := FirstValue(payload, "id", "firebase_id")
+	if id == "" {
+		id = GenerateUniqueID()
+	}
+	payload["id"] = id
+	payload["firebase_id"] = id
+
+	// 2. Extraer campos
+	barrio := FirstValue(payload, "barrio")
+	celularDest := FirstValue(payload, "celularDestinatario", "celular_destinatario")
+	celularRem := FirstValue(payload, "celularRemitente", "celular_remitente")
+	ciudad := FirstValue(payload, "ciudad")
+	descripcion := FirstValue(payload, "descripcionPedido", "descripcion_pedido")
+	direccion := FirstValue(payload, "direccion")
+	estado := FirstValue(payload, "estado")
+	if estado == "" {
+		estado = "pendiente"
+	}
+	fechaCreacion := FirstValue(payload, "fechaCreacion", "fecha_creacion")
+	if fechaCreacion == "" {
+		fechaCreacion = time.Now().UTC().Format(time.RFC3339)
+	}
+	fechaEntrega := FirstValue(payload, "fechaEntrega", "fecha_entrega")
+	horaEntrega := FirstValue(payload, "horaEntrega", "hora_entrega")
+	medioPago := FirstValue(payload, "medioPago", "medio_pago")
+	mensajeTarjeta := FirstValue(payload, "mensajeTarjeta", "mensaje_tarjeta")
+	metodoAnticipo := FirstValue(payload, "metodoPagoAnticipo", "metodo_pago_anticipo")
+	montoAnticipo := FirstValue(payload, "montoAnticipo", "monto_anticipo")
+	montoTotal := FirstValue(payload, "montoTotal", "monto_total")
+	nombreDest := FirstValue(payload, "nombreDestinatario", "nombre_destinatario")
+	nombreRem := FirstValue(payload, "nombreRemitente", "nombre_remitente")
+	numeroWhatsApp := FirstValue(payload, "numeroWhatsAppUsado", "numero_whatsapp_usado")
+	pais := FirstValue(payload, "pais")
+	puntoRef := FirstValue(payload, "puntoReferencia", "punto_referencia")
+
+	// 3. Serializar datos_originales
+	datosOriginales, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("error insertando pedido: %w", err)
+		return nil, fmt.Errorf("error serializando datos_originales: %w", err)
 	}
 
-	if flowers, ok := payload["itemsFlores"].([]any); ok {
-		if err := r.persistFlowerItems(ctx, item, flowers); err != nil {
-			log.Printf("repositorio: no se pudieron guardar items_flores: %v", err)
-		}
-		if item["itemsFlores"] == nil {
-			item["itemsFlores"] = flowers
+	// 4. Inserción en pedidos
+	insertQ := `
+		INSERT INTO pedidos (
+			firebase_id, barrio, celular_destinatario, celular_remitente,
+			ciudad, descripcion_pedido, direccion, estado,
+			fecha_creacion_texto, fecha_entrega_texto, hora_entrega_texto,
+			medio_pago, mensaje_tarjeta, metodo_pago_anticipo,
+			monto_anticipo_texto, monto_total_texto, nombre_destinatario,
+			nombre_remitente, numero_whatsapp_usado, pais,
+			punto_referencia, datos_originales, migrado_en
+		) VALUES (
+			$1, $2, $3, $4,
+			$5, $6, $7, $8,
+			$9, $10, $11,
+			$12, $13, $14,
+			$15, $16, $17,
+			$18, $19, $20,
+			$21, $22, now()
+		);
+	`
+	_, err = r.db.Exec(ctx, insertQ,
+		id, barrio, celularDest, celularRem,
+		ciudad, descripcion, direccion, estado,
+		fechaCreacion, fechaEntrega, horaEntrega,
+		medioPago, mensajeTarjeta, metodoAnticipo,
+		montoAnticipo, montoTotal, nombreDest,
+		nombreRem, numeroWhatsApp, pais,
+		puntoRef, datosOriginales,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("error insertando pedido en postgres: %w", err)
+	}
+
+	// 5. Inserción en items_flores
+	if flowers, ok := payload["itemsFlores"].([]any); ok && len(flowers) > 0 {
+		for i, raw := range flowers {
+			flower, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			cant := parseNumeric(flower["cantidad"])
+			tipo := FirstValue(flower, "tipo")
+			emoji := FirstValue(flower, "emoji")
+			colores := parseStringArray(flower["colores"])
+
+			flowerJSON, _ := json.Marshal(flower)
+
+			flowerInsertQ := `
+				INSERT INTO items_flores (
+					pedido_firebase_id, posicion, cantidad,
+					colores, emoji, tipo, datos_originales
+				) VALUES ($1, $2, $3, $4, $5, $6, $7);
+			`
+			_, err := r.db.Exec(ctx, flowerInsertQ, id, i, cant, colores, emoji, tipo, flowerJSON)
+			if err != nil {
+				log.Printf("repositorio: advertencia insertando flor #%d: %v", i, err)
+			}
 		}
 	}
-	return item, nil
+
+	return payload, nil
 }
 
 func (r *postgresPedidoRepo) Update(ctx context.Context, id string, payload map[string]any) (map[string]any, error) {
-	cols, err := r.columns(ctx, "pedidos")
+	nuevoEstado, hasEstado := payload["estado"].(string)
+	if !hasEstado || strings.TrimSpace(nuevoEstado) == "" {
+		return nil, fmt.Errorf("actualización requiere campo 'estado'")
+	}
+
+	q := `
+		UPDATE pedidos 
+		SET estado = $1, 
+		    datos_originales = jsonb_set(COALESCE(datos_originales, '{}'::jsonb), '{estado}', to_jsonb($1::text))
+		WHERE firebase_id = $2
+		RETURNING firebase_id, estado, datos_originales;
+	`
+	var firebaseID, estado string
+	var datosOriginalesRaw []byte
+
+	err := r.db.QueryRow(ctx, q, nuevoEstado, id).Scan(&firebaseID, &estado, &datosOriginalesRaw)
 	if err != nil {
-		return nil, err
-	}
-	idCol := FindIDColumn(cols)
-
-	sets, args := make([]string, 0), make([]any, 0)
-	for key, value := range payload {
-		col := ResolveColumn(cols, key)
-		if col == "" || col == idCol {
-			continue
-		}
-		args = append(args, value)
-		sets = append(sets, fmt.Sprintf(`"%s"=$%d`, col, len(args)))
-	}
-	if len(sets) == 0 {
-		return nil, fmt.Errorf("no hay campos válidos para actualizar")
+		return nil, fmt.Errorf("error actualizando estado de pedido %s: %w", id, err)
 	}
 
-	args = append(args, id)
-	q := fmt.Sprintf(`UPDATE pedidos SET %s WHERE "%s"::text=$%d RETURNING row_to_json(pedidos)`,
-		strings.Join(sets, ", "), idCol, len(args))
-
-	var raw []byte
-	if err := r.db.QueryRow(ctx, q, args...).Scan(&raw); err != nil {
-		return nil, fmt.Errorf("error actualizando pedido %s: %w", id, err)
+	item := make(map[string]any)
+	if len(datosOriginalesRaw) > 0 {
+		_ = json.Unmarshal(datosOriginalesRaw, &item)
 	}
+	item["id"] = firebaseID
+	item["firebase_id"] = firebaseID
+	item["estado"] = estado
 
-	var out map[string]any
-	_ = json.Unmarshal(raw, &out)
-	if out["id"] == nil {
-		out["id"] = FirstValue(out, "id", "pedido_id", "id_pedido")
-	}
-	return out, nil
+	return item, nil
 }
 
 func (r *postgresPedidoRepo) Delete(ctx context.Context, id string) error {
-	cols, err := r.columns(ctx, "pedidos")
+	// 1. Eliminar items de flores asociados
+	_, _ = r.db.Exec(ctx, `DELETE FROM items_flores WHERE pedido_firebase_id = $1`, id)
+
+	// 2. Eliminar pedido
+	cmdTag, err := r.db.Exec(ctx, `DELETE FROM pedidos WHERE firebase_id = $1`, id)
 	if err != nil {
-		return err
+		return fmt.Errorf("error eliminando pedido %s: %w", id, err)
 	}
-	idCol := FindIDColumn(cols)
-
-	// Eliminar detalle de items_flores primero para evitar violaciones de clave foránea
-	flowerCols, err := r.columns(ctx, "items_flores")
-	if err == nil && len(flowerCols) > 0 {
-		fk := ResolveColumn(flowerCols, "pedido_id")
-		if fk == "" {
-			fk = ResolveColumn(flowerCols, "pedidoId")
-		}
-		if fk == "" {
-			fk = ResolveColumn(flowerCols, "id_pedido")
-		}
-		if fk != "" {
-			_, _ = r.db.Exec(ctx, fmt.Sprintf(`DELETE FROM items_flores WHERE "%s"::text=$1`, fk), id)
-		}
-	}
-
-	_, err = r.db.Exec(ctx, fmt.Sprintf(`DELETE FROM pedidos WHERE "%s"::text=$1`, idCol), id)
-	return err
-}
-
-func (r *postgresPedidoRepo) insert(ctx context.Context, table string, payload map[string]any) (map[string]any, error) {
-	cols, err := r.columns(ctx, table)
-	if err != nil {
-		return nil, err
-	}
-	idCol := FindIDColumn(cols)
-	names, marks, args := make([]string, 0), make([]string, 0), make([]any, 0)
-
-	for key, value := range payload {
-		col := ResolveColumn(cols, key)
-		if col == "" || (col == idCol && value == nil) {
-			continue
-		}
-
-		var finalVal any = value
-		switch v := value.(type) {
-		case []any, map[string]any:
-			if b, err := json.Marshal(v); err == nil {
-				finalVal = string(b)
-			}
-		}
-
-		args = append(args, finalVal)
-		names = append(names, `"`+col+`"`)
-		marks = append(marks, fmt.Sprintf("$%d", len(args)))
-	}
-
-	if len(names) == 0 {
-		return nil, fmt.Errorf("no hay columnas compatibles para %s", table)
-	}
-
-	q := fmt.Sprintf(`INSERT INTO "%s" (%s) VALUES (%s) RETURNING row_to_json("%s")`,
-		table, strings.Join(names, ", "), strings.Join(marks, ", "), table)
-
-	var raw []byte
-	if err := r.db.QueryRow(ctx, q, args...).Scan(&raw); err != nil {
-		return nil, err
-	}
-	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
-	}
-	if out["id"] == nil {
-		out["id"] = FirstValue(out, "id", "pedido_id", "id_pedido")
-	}
-	return out, nil
-}
-
-func (r *postgresPedidoRepo) attachFlowerItems(ctx context.Context, orders []map[string]any) error {
-	var exists bool
-	err := r.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='items_flores')`).Scan(&exists)
-	if err != nil || !exists {
-		return nil
-	}
-	rows, err := r.db.Query(ctx, `SELECT row_to_json(f) FROM items_flores f`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	byOrder := map[string][]map[string]any{}
-	for rows.Next() {
-		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
-			return err
-		}
-		var item map[string]any
-		if err := json.Unmarshal(raw, &item); err != nil {
-			continue
-		}
-		fk := FirstValue(item, "pedido_id", "pedidoId", "id_pedido", "pedido")
-		if fk != "" {
-			if coloresStr, ok := item["colores"].(string); ok && strings.HasPrefix(coloresStr, "[") {
-				var coloresArr []any
-				if err := json.Unmarshal([]byte(coloresStr), &coloresArr); err == nil {
-					item["colores"] = coloresArr
-				}
-			}
-			byOrder[fk] = append(byOrder[fk], item)
-		}
-	}
-
-	for _, order := range orders {
-		id := FirstValue(order, "id", "pedido_id", "id_pedido")
-		if items, ok := byOrder[id]; ok && len(items) > 0 {
-			order["itemsFlores"] = items
-		}
-	}
-	return rows.Err()
-}
-
-func (r *postgresPedidoRepo) persistFlowerItems(ctx context.Context, order map[string]any, flowers []any) error {
-	cols, err := r.columns(ctx, "items_flores")
-	if err != nil || len(cols) == 0 {
-		return err
-	}
-	orderID := FirstValue(order, "id", "pedido_id", "id_pedido")
-	if orderID == "" {
-		return nil
-	}
-	foreignKey := ResolveColumn(cols, "pedido_id")
-	if foreignKey == "" {
-		foreignKey = ResolveColumn(cols, "pedidoId")
-	}
-	if foreignKey == "" {
-		foreignKey = ResolveColumn(cols, "id_pedido")
-	}
-	if foreignKey == "" {
-		return nil
-	}
-
-	for _, raw := range flowers {
-		flower, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		payload := map[string]any{foreignKey: orderID}
-		for key, value := range flower {
-			payload[key] = value
-		}
-		if _, err := r.insert(ctx, "items_flores", payload); err != nil {
-			log.Printf("repositorio: error guardando item_flor: %v", err)
-		}
+	if cmdTag.RowsAffected() == 0 {
+		return fmt.Errorf("pedido %s no encontrado", id)
 	}
 	return nil
 }
 
-func (r *postgresPedidoRepo) columns(ctx context.Context, table string) (map[string]string, error) {
-	rows, err := r.db.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=$1`, table)
+func (r *postgresPedidoRepo) attachFlowerItems(ctx context.Context, orders []map[string]any) error {
+	q := `
+		SELECT 
+			pedido_firebase_id,
+			posicion,
+			COALESCE(cantidad, 0) AS cantidad,
+			colores,
+			COALESCE(emoji, '🌸') AS emoji,
+			COALESCE(tipo, '') AS tipo,
+			datos_originales
+		FROM items_flores
+		ORDER BY posicion ASC;
+	`
+	rows, err := r.db.Query(ctx, q)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 
-	cols := map[string]string{}
+	byOrder := make(map[string][]map[string]any)
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
+		var pedidoFirebaseID string
+		var posicion int
+		var cantidad float64
+		var colores []string
+		var emoji, tipo string
+		var datosOriginalesRaw []byte
+
+		if err := rows.Scan(
+			&pedidoFirebaseID,
+			&posicion,
+			&cantidad,
+			&colores,
+			&emoji,
+			&tipo,
+			&datosOriginalesRaw,
+		); err != nil {
+			return err
 		}
-		cols[name] = name
+
+		item := make(map[string]any)
+		if len(datosOriginalesRaw) > 0 {
+			_ = json.Unmarshal(datosOriginalesRaw, &item)
+		}
+
+		// Normalizar claves si no estaban en datos_originales
+		if item["tipo"] == nil || item["tipo"] == "" {
+			item["tipo"] = tipo
+		}
+		if item["emoji"] == nil || item["emoji"] == "" {
+			item["emoji"] = emoji
+		}
+		if item["cantidad"] == nil {
+			item["cantidad"] = cantidad
+		}
+		if item["colores"] == nil {
+			item["colores"] = colores
+		}
+
+		byOrder[pedidoFirebaseID] = append(byOrder[pedidoFirebaseID], item)
 	}
-	return cols, rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, order := range orders {
+		id := FirstValue(order, "id", "firebase_id")
+		if items, ok := byOrder[id]; ok && len(items) > 0 {
+			order["itemsFlores"] = items
+		}
+	}
+
+	return nil
 }
 
-// Helpers exportados para pruebas y uso en capas
-func FindIDColumn(cols map[string]string) string {
-	for _, candidate := range []string{"id", "pedido_id", "id_pedido", "pedidoId"} {
-		if c, ok := cols[candidate]; ok {
-			return c
-		}
-		snake := CamelToSnake(candidate)
-		if c, ok := cols[snake]; ok {
-			return c
-		}
+// GenerateUniqueID genera un identificador único alfanumérico aleatorio (20 caracteres)
+func GenerateUniqueID() string {
+	bytes := make([]byte, 10)
+	if _, err := rand.Read(bytes); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
-	return "id"
-}
-
-func ResolveColumn(cols map[string]string, key string) string {
-	if _, ok := cols[key]; ok {
-		return key
-	}
-	snake := CamelToSnake(key)
-	if _, ok := cols[snake]; ok {
-		return snake
-	}
-	return ""
-}
-
-func CamelToSnake(s string) string {
-	var b strings.Builder
-	for i, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			b.WriteByte(byte(r - 'A' + 'a'))
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
+	return hex.EncodeToString(bytes)
 }
 
 func FirstValue(values map[string]any, keys ...string) string {
 	for _, key := range keys {
-		if value, ok := values[key]; ok && value != nil && fmt.Sprint(value) != "" {
-			return fmt.Sprint(value)
+		if val, ok := values[key]; ok && val != nil {
+			s := strings.TrimSpace(fmt.Sprint(val))
+			if s != "" {
+				return s
+			}
 		}
 	}
 	return ""
+}
+
+func parseNumeric(v any) float64 {
+	switch val := v.(type) {
+	case float64:
+		return val
+	case float32:
+		return float64(val)
+	case int:
+		return float64(val)
+	case int64:
+		return float64(val)
+	case string:
+		var f float64
+		_, _ = fmt.Sscanf(val, "%f", &f)
+		return f
+	default:
+		return 0
+	}
+}
+
+func parseStringArray(v any) []string {
+	res := make([]string, 0)
+	switch arr := v.(type) {
+	case []string:
+		return arr
+	case []any:
+		for _, item := range arr {
+			if s := strings.TrimSpace(fmt.Sprint(item)); s != "" {
+				res = append(res, s)
+			}
+		}
+	}
+	return res
 }
