@@ -1,4 +1,4 @@
-package main
+package repository
 
 import (
 	"testing"
@@ -14,9 +14,9 @@ func TestCamelToSnake(t *testing.T) {
 	}
 
 	for in, expected := range tests {
-		got := camelToSnake(in)
+		got := CamelToSnake(in)
 		if got != expected {
-			t.Errorf("camelToSnake(%q) = %q; want %q", in, got, expected)
+			t.Errorf("CamelToSnake(%q) = %q; want %q", in, got, expected)
 		}
 	}
 }
@@ -28,31 +28,31 @@ func TestResolveColumn(t *testing.T) {
 		"fechaCreacion":    "fechaCreacion",
 	}
 
-	if resolveColumn(cols, "nombreRemitente") != "nombre_remitente" {
-		t.Errorf("failed resolving snake_case column")
+	if ResolveColumn(cols, "nombreRemitente") != "nombre_remitente" {
+		t.Errorf("falló al resolver columna en snake_case")
 	}
-	if resolveColumn(cols, "fechaCreacion") != "fechaCreacion" {
-		t.Errorf("failed resolving camelCase column")
+	if ResolveColumn(cols, "fechaCreacion") != "fechaCreacion" {
+		t.Errorf("falló al resolver columna en camelCase")
 	}
-	if resolveColumn(cols, "inexistente") != "" {
-		t.Errorf("expected empty string for non-existent column")
+	if ResolveColumn(cols, "inexistente") != "" {
+		t.Errorf("se esperaba cadena vacía para columna inexistente")
 	}
 }
 
 func TestFindIDColumn(t *testing.T) {
 	cols1 := map[string]string{"id": "id", "nombre": "nombre"}
-	if findIDColumn(cols1) != "id" {
-		t.Errorf("expected 'id'")
+	if FindIDColumn(cols1) != "id" {
+		t.Errorf("se esperaba 'id'")
 	}
 
 	cols2 := map[string]string{"pedido_id": "pedido_id", "nombre": "nombre"}
-	if findIDColumn(cols2) != "pedido_id" {
-		t.Errorf("expected 'pedido_id'")
+	if FindIDColumn(cols2) != "pedido_id" {
+		t.Errorf("se esperaba 'pedido_id'")
 	}
 
 	cols3 := map[string]string{"id_pedido": "id_pedido", "nombre": "nombre"}
-	if findIDColumn(cols3) != "id_pedido" {
-		t.Errorf("expected 'id_pedido'")
+	if FindIDColumn(cols3) != "id_pedido" {
+		t.Errorf("se esperaba 'id_pedido'")
 	}
 }
 
@@ -61,8 +61,8 @@ func TestFirstValue(t *testing.T) {
 		"id":        nil,
 		"pedido_id": 123,
 	}
-	val := firstValue(m, "id", "pedido_id")
+	val := FirstValue(m, "id", "pedido_id")
 	if val != "123" {
-		t.Errorf("expected '123', got %q", val)
+		t.Errorf("se esperaba '123', se obtuvo %q", val)
 	}
 }
